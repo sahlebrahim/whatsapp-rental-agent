@@ -61,6 +61,7 @@ class Property(Base):
     status = Column(String(20), default="available")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    images = relationship("PropertyImage", backref="property")
 
     def to_chat_summary(self):
         amenities = []
@@ -95,3 +96,19 @@ class PropertyImage(Base):
     caption = Column(String(200), nullable=True)
     display_order = Column(Integer, default=0)
     is_hero = Column(Boolean, default=False)
+
+class ConversationSession(Base):
+    __tablename__ = "conversation_sessions"
+
+    id = Column(Integer, primary_key=True)
+    phone_number = Column(String(20), nullable=False, unique=True)
+    session_data = Column(Text, nullable=True)
+    last_active = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+Index("idx_rent_area", Property.monthly_rent, Property.area)
+Index("idx_type_area", Property.property_type, Property.area)
+Index("idx_gender_area", Property.gender_preference, Property.area)
+
+Base.metadata.create_all(engine)
