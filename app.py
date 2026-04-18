@@ -59,11 +59,11 @@ async def get_ai_response(user_message, phone_number):
     if message.tool_calls:
         tool_call = message.tool_calls[0]
         args = json.loads(tool_call.function.arguments)
-        print(f"tool call hit >> {tool_call.function.name} with {args}")
+        print(f"tool call: {tool_call.function.name} args={args}")
 
         if "area" in args:
             args["area"] = resolve_area(args["area"])
-            print(f"area resolved to >> {args['area']}")
+            print(f"area resolved: {args['area']}")
 
         results = search_properties(**args)
         print(f"db returned {len(results)} listings")
@@ -86,10 +86,10 @@ async def get_ai_response(user_message, phone_number):
             messages=messages,
         )
 
-        return final_response.choices[0].message.content
+        return final_response.choices[0].message.content, results
 
-    print(f"no tool call, just vibes")
-    return message.content
+    print("no tool call")
+    return message.content, []
 
 
 @app.get("/webhook")
@@ -102,9 +102,9 @@ async def verify(request: Request):
 
 @app.post("/webhook")
 async def webhook(request: Request):
-    data = await request.json()
-
     try:
+        data = await request.json()
+
         entry = data["entry"][0]
         changes = entry["changes"][0]
         value = changes["value"]
@@ -115,23 +115,36 @@ async def webhook(request: Request):
         message = value["messages"][0]
         phone = message["from"]
         text = message.get("text", {}).get("body", "")
-        print(f"msg from {phone} >> {text}")
+        print(f"incoming from {phone}: {text}")
 
         if not text:
             return {"status": "no text"}
 
-        reply = await get_ai_response(text, phone)
-        print(f"replying >> {reply[:80]}...")
-        await send_whatsapp_message(phone, reply)
+        reply, properties = await get_ai_response(text, phone)
+        print(f"reply: {reply[:80]}")
 
-    except (KeyError, IndexError) as e:
-        print(f"something broke >> {e}")
+        if properties:
+            for prop in properties[:3]:
+                hero = next((img for img in prop.images if img.is_hero), None)
+                if not hero and prop.images:
+                    hero = prop.images[0]
+
+                if hero:
+                    caption = prop.to_chat_summary()
+                    await send_whatsapp_image(phone, hero.image_url, caption)
+                else:
+                    await send_whatsapp_message(phone, prop.to_chat_summary())
+        else:
+            await send_whatsapp_message(phone, reply)
+
+    except Exception as e:
+        print(f"webhook error: {type(e).__name__}: {e}")
 
     return {"status": "ok"}
 
 
 async def send_whatsapp_message(to, text):
-    url = f"https://graph.facebook.com/v21.0/{PHONE_NUMBER_ID}/messages"
+    url = f"https://graph.facebook.com/v24.0/{PHONE_NUMBER_ID}/messages"
     headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
     payload = {
         "messaging_product": "whatsapp",
@@ -141,4 +154,18 @@ async def send_whatsapp_message(to, text):
     }
     async with httpx.AsyncClient() as client:
         r = await client.post(url, json=payload, headers=headers)
-        print(f"wa api >> {r.status_code}")
+        print(f"wa text: {r.status_code}")
+
+
+async def send_whatsapp_image(to, image_url, caption=""):
+    url = f"https://graph.facebook.com/v24.0/{PHONE_NUMBER_ID}/messages"
+    headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+    payload = {
+        "messaging_product": "whatsapp",
+        "to": to,
+        "type": "image",
+        "image": {"link": image_url, "caption": caption}
+    }
+    async with httpx.AsyncClient() as client:
+        r = await client.post(url, json=payload, headers=headers)
+        print(f"wa image: {r.status_code} {r.text[:200]}")

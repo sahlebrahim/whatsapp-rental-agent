@@ -2,3 +2,7 @@ rental.db
 test_queries.py
 __pycache__/
 .env
+test_local.py
+venv/
+*.pyc
+.DS_Store

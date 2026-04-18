@@ -1,11 +1,15 @@
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from models import engine, Property, PropertyImage, DubaiArea
 
 
 def search_properties(area=None, max_rent=None, min_rent=None,
                       property_type=None, gender=None, limit=5):
     with Session(engine) as session:
-        query = session.query(Property).filter(Property.status == "available")
+        query = (
+            session.query(Property)
+            .options(joinedload(Property.images))
+            .filter(Property.status == "available")
+        )
 
         if area:
             query = query.filter(Property.area.ilike(f"%{area}%"))
@@ -24,9 +28,10 @@ def search_properties(area=None, max_rent=None, min_rent=None,
                 Property.gender_preference.in_([gender, "any"])
             )
 
-        results = query.order_by(Property.monthly_rent.asc()).limit(limit).all()
+        results = query.order_by(Property.monthly_rent.asc()).limit(limit).unique().all()
         return results
-    
+
+
 def resolve_area(user_input):
     with Session(engine) as session:
         areas = session.query(DubaiArea).all()
