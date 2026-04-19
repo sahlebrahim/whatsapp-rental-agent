@@ -17,13 +17,13 @@ from datetime import datetime
 Base = declarative_base()
 engine = create_engine("sqlite:///rental.db", echo=True)
 
+
 class DubaiArea(Base):
     __tablename__ = "dubai_areas"
 
     id = Column(Integer, primary_key=True)
     name = Column(String(100), nullable=False, unique=True)
     aliases = Column(Text, nullable=True)
-
 
 
 class Property(Base):
@@ -75,18 +75,21 @@ class Property(Base):
             amenities.append("Gym/Pool")
 
         summary = f"*{self.title}*\n"
-        summary += f"📍 {self.area}\n"
-        summary += f"💰 AED {self.monthly_rent:,.0f}/month\n"
-        summary += f"🏠 {self.property_type.replace('_', ' ').title()}\n"
+        summary += f"Location: {self.area}\n"
+        summary += f"Rent: AED {self.monthly_rent:,.0f}/month\n"
+        summary += f"Type: {self.property_type.replace('_', ' ').title()}\n"
 
         if amenities:
-            summary += f"✅ {', '.join(amenities)}\n"
+            summary += f"Includes: {', '.join(amenities)}\n"
 
         if self.gender_preference != "any":
-            summary += f"👤 {self.gender_preference.title()} only\n"
+            summary += f"For: {self.gender_preference.title()} only\n"
+
+        summary += f"\nMore photos: https://rag.sahlebrahim.com/property/{self.id}"
 
         return summary
-    
+
+
 class PropertyImage(Base):
     __tablename__ = "property_images"
 
@@ -96,6 +99,7 @@ class PropertyImage(Base):
     caption = Column(String(200), nullable=True)
     display_order = Column(Integer, default=0)
     is_hero = Column(Boolean, default=False)
+
 
 class ConversationSession(Base):
     __tablename__ = "conversation_sessions"
