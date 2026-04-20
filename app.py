@@ -5,6 +5,9 @@ from fastapi import FastAPI, Request
 from openai import OpenAI
 from queries import search_properties, resolve_area
 from dotenv import load_dotenv
+from fastapi.responses import HTMLResponse
+from sqlalchemy.orm import Session
+from models import engine, Property
 
 load_dotenv()
 app = FastAPI()
@@ -99,6 +102,66 @@ async def verify(request: Request):
         return int(params.get("hub.challenge"))
     return {"error": "Invalid token"}
 
+@app.get("/property/{property_id}", response_class=HTMLResponse)
+async def property_gallery(property_id: int):
+    with Session(engine) as session:
+        prop = session.query(Property).filter_by(id=property_id).first()
+        if not prop:
+            return HTMLResponse("<h1>Property not found</h1>", status_code=404)
+        images = sorted(prop.images, key=lambda i: i.display_order)
+
+    amenities = []
+    if prop.wifi_included:
+        amenities.append("WiFi")
+    if prop.dewa_included:
+        amenities.append("DEWA")
+    if prop.parking_included:
+        amenities.append("Parking")
+    if prop.gym_pool_access:
+        amenities.append("Gym/Pool")
+
+    amenities_html = ", ".join(amenities) if amenities else "None listed"
+    gender_html = f"{prop.gender_preference.title()} only" if prop.gender_preference != "any" else "Any gender"
+    images_html = "".join(
+        f'<img src="{img.image_url}" alt="{img.caption or prop.title}" loading="lazy"/>'
+        for img in images
+    )
+
+    html = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>{prop.title}</title>
+<style>
+  body {{ margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #f5f5f5; color: #222; }}
+  .header {{ padding: 20px 16px; background: #fff; border-bottom: 1px solid #e0e0e0; }}
+  .header h1 {{ margin: 0 0 8px 0; font-size: 20px; }}
+  .header .meta {{ color: #555; font-size: 14px; line-height: 1.6; }}
+  .header .meta div {{ margin: 2px 0; }}
+  .price {{ font-size: 18px; font-weight: 600; color: #2a7; margin: 8px 0; }}
+  .gallery {{ display: flex; flex-direction: column; gap: 2px; background: #000; }}
+  .gallery img {{ width: 100%; display: block; }}
+  .empty {{ padding: 40px 16px; text-align: center; color: #888; }}
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>{prop.title}</h1>
+    <div class="price">AED {prop.monthly_rent:,.0f}/month</div>
+    <div class="meta">
+      <div>Location: {prop.area}</div>
+      <div>Type: {prop.property_type.replace('_', ' ').title()}</div>
+      <div>Includes: {amenities_html}</div>
+      <div>For: {gender_html}</div>
+    </div>
+  </div>
+  <div class="gallery">
+    {images_html if images_html else '<div class="empty">No photos available yet</div>'}
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(html)
 
 @app.post("/webhook")
 async def webhook(request: Request):
