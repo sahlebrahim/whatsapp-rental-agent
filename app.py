@@ -7,7 +7,8 @@ from queries import search_properties, resolve_area
 from dotenv import load_dotenv
 from fastapi.responses import HTMLResponse
 from sqlalchemy.orm import Session
-from models import engine, Property
+from models import engine, Property, PropertyImage
+import time
 
 load_dotenv()
 app = FastAPI()
@@ -183,6 +184,15 @@ async def webhook(request: Request):
         if not text:
             return {"status": "no text"}
 
+        if text.lower().startswith("stress test"):
+            parts = text.split()
+            try:
+                n = int(parts[-1])
+            except ValueError:
+                n = 10
+            await stress_test(phone, n)
+            return {"status": "ok"}
+
         reply, properties = await get_ai_response(text, phone)
         print(f"reply: {reply[:80]}")
 
@@ -232,3 +242,29 @@ async def send_whatsapp_image(to, image_url, caption=""):
     async with httpx.AsyncClient() as client:
         r = await client.post(url, json=payload, headers=headers)
         print(f"wa image: {r.status_code} {r.text[:200]}")
+
+async def stress_test(phone, n):
+    with Session(engine) as session:
+        images = session.query(PropertyImage).limit(n).all()
+        urls_and_captions = [(img.image_url, f"{i}/{len(images)}") for i, img in enumerate(images, 1)]
+
+    print(f"stress test start: sending {len(urls_and_captions)} images to {phone}")
+    t_start = time.time()
+
+    for i, (url, caption) in enumerate(urls_and_captions, 1):
+        t0 = time.time()
+        api_url = f"https://graph.facebook.com/v24.0/{PHONE_NUMBER_ID}/messages"
+        headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
+        payload = {
+            "messaging_product": "whatsapp",
+            "to": phone,
+            "type": "image",
+            "image": {"link": url, "caption": caption}
+        }
+        async with httpx.AsyncClient() as client:
+            r = await client.post(api_url, json=payload, headers=headers)
+            elapsed = time.time() - t0
+            print(f"stress {i}/{len(urls_and_captions)}: status={r.status_code} elapsed={elapsed:.2f}s body={r.text[:200]}")
+
+    total = time.time() - t_start
+    print(f"stress test done: {len(urls_and_captions)} images in {total:.2f}s")
