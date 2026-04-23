@@ -1,14 +1,14 @@
 import json
 import os
 import httpx
-from fastapi import FastAPI, Request
-from openai import OpenAI
-from queries import search_properties, resolve_area
-from dotenv import load_dotenv
-from fastapi.responses import HTMLResponse
-from sqlalchemy.orm import Session
-from models import engine, Property, PropertyImage
 import time
+from fastapi import FastAPI, Request
+from fastapi.responses import HTMLResponse
+from openai import OpenAI
+from sqlalchemy.orm import Session
+from dotenv import load_dotenv
+from queries import search_properties, resolve_area
+from models import engine, Property, PropertyImage
 
 load_dotenv()
 app = FastAPI()
@@ -17,6 +17,8 @@ openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 WHATSAPP_TOKEN = os.getenv("WHATSAPP_TOKEN")
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID")
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+
+last_results = {}
 
 TOOLS = [
     {
@@ -63,14 +65,11 @@ async def get_ai_response(user_message, phone_number):
     if message.tool_calls:
         tool_call = message.tool_calls[0]
         args = json.loads(tool_call.function.arguments)
-        print(f"tool call: {tool_call.function.name} args={args}")
 
         if "area" in args:
             args["area"] = resolve_area(args["area"])
-            print(f"area resolved: {args['area']}")
 
         results = search_properties(**args)
-        print(f"db returned {len(results)} listings")
 
         if results:
             listings = "\n\n".join([p.to_chat_summary() for p in results])
@@ -92,7 +91,6 @@ async def get_ai_response(user_message, phone_number):
 
         return final_response.choices[0].message.content, results
 
-    print("no tool call")
     return message.content, []
 
 
@@ -102,6 +100,7 @@ async def verify(request: Request):
     if params.get("hub.verify_token") == VERIFY_TOKEN:
         return int(params.get("hub.challenge"))
     return {"error": "Invalid token"}
+
 
 @app.get("/property/{property_id}", response_class=HTMLResponse)
 async def property_gallery(property_id: int):
@@ -164,6 +163,7 @@ async def property_gallery(property_id: int):
 </html>"""
     return HTMLResponse(html)
 
+
 @app.post("/webhook")
 async def webhook(request: Request):
     try:
@@ -179,7 +179,6 @@ async def webhook(request: Request):
         message = value["messages"][0]
         phone = message["from"]
         text = message.get("text", {}).get("body", "")
-        print(f"incoming from {phone}: {text}")
 
         if not text:
             return {"status": "no text"}
@@ -193,20 +192,48 @@ async def webhook(request: Request):
             await stress_test(phone, n)
             return {"status": "ok"}
 
+        stripped = text.strip()
+        if stripped.isdigit() and phone in last_results:
+            idx = int(stripped)
+            if 1 <= idx <= len(last_results[phone]):
+                prop_id = last_results[phone][idx - 1]
+                await send_more_photos(phone, prop_id)
+                return {"status": "ok"}
+
         reply, properties = await get_ai_response(text, phone)
-        print(f"reply: {reply[:80]}")
 
         if properties:
-            for prop in properties[:3]:
+            shown = properties[:3]
+            property_ids = []
+
+            for idx, prop in enumerate(shown, 1):
                 hero = next((img for img in prop.images if img.is_hero), None)
                 if not hero and prop.images:
                     hero = prop.images[0]
 
+                caption = f"[{idx}] {prop.to_chat_summary()}"
+
                 if hero:
-                    caption = prop.to_chat_summary()
                     await send_whatsapp_image(phone, hero.image_url, caption)
                 else:
-                    await send_whatsapp_message(phone, prop.to_chat_summary())
+                    await send_whatsapp_message(phone, caption)
+
+                property_ids.append(prop.id)
+
+            last_results[phone] = property_ids
+
+            if len(property_ids) == 1:
+                hint = "Reply 1"
+            elif len(property_ids) == 2:
+                hint = "Reply 1 or 2"
+            else:
+                nums = ", ".join(str(i) for i in range(1, len(property_ids)))
+                hint = f"Reply {nums} or {len(property_ids)}"
+
+            await send_whatsapp_message(
+                phone,
+                f"{hint} to see more photos of that listing."
+            )
         else:
             await send_whatsapp_message(phone, reply)
 
@@ -214,6 +241,41 @@ async def webhook(request: Request):
         print(f"webhook error: {type(e).__name__}: {e}")
 
     return {"status": "ok"}
+
+
+async def send_more_photos(phone, property_id):
+    with Session(engine) as session:
+        prop = session.query(Property).filter_by(id=property_id).first()
+        if not prop:
+            await send_whatsapp_message(phone, "Sorry, that listing is no longer available.")
+            return
+
+        images = (
+            session.query(PropertyImage)
+            .filter_by(property_id=property_id, is_hero=False)
+            .order_by(PropertyImage.display_order)
+            .all()
+        )
+
+        if not images:
+            await send_whatsapp_message(phone, "No additional photos available for this listing.")
+            return
+
+        title = prop.title
+        total = len(images)
+
+    await send_whatsapp_message(phone, f"{total} more photos of *{title}*:")
+
+    for i, img in enumerate(images, 1):
+        caption = f"{i}/{total}"
+        await send_whatsapp_image(phone, img.image_url, caption)
+
+    await send_whatsapp_message(
+        phone,
+        f"All photos for *{title}*.\n"
+        f"Full gallery: https://rag.sahlebrahim.com/property/{property_id}\n\n"
+        f"Search again or ask me anything."
+    )
 
 
 async def send_whatsapp_message(to, text):
@@ -226,8 +288,7 @@ async def send_whatsapp_message(to, text):
         "text": {"body": text}
     }
     async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload, headers=headers)
-        print(f"wa text: {r.status_code}")
+        await client.post(url, json=payload, headers=headers)
 
 
 async def send_whatsapp_image(to, image_url, caption=""):
@@ -240,19 +301,15 @@ async def send_whatsapp_image(to, image_url, caption=""):
         "image": {"link": image_url, "caption": caption}
     }
     async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload, headers=headers)
-        print(f"wa image: {r.status_code} {r.text[:200]}")
+        await client.post(url, json=payload, headers=headers)
+
 
 async def stress_test(phone, n):
     with Session(engine) as session:
         images = session.query(PropertyImage).limit(n).all()
         urls_and_captions = [(img.image_url, f"{i}/{len(images)}") for i, img in enumerate(images, 1)]
 
-    print(f"stress test start: sending {len(urls_and_captions)} images to {phone}")
-    t_start = time.time()
-
-    for i, (url, caption) in enumerate(urls_and_captions, 1):
-        t0 = time.time()
+    for url, caption in urls_and_captions:
         api_url = f"https://graph.facebook.com/v24.0/{PHONE_NUMBER_ID}/messages"
         headers = {"Authorization": f"Bearer {WHATSAPP_TOKEN}"}
         payload = {
@@ -262,9 +319,4 @@ async def stress_test(phone, n):
             "image": {"link": url, "caption": caption}
         }
         async with httpx.AsyncClient() as client:
-            r = await client.post(api_url, json=payload, headers=headers)
-            elapsed = time.time() - t0
-            print(f"stress {i}/{len(urls_and_captions)}: status={r.status_code} elapsed={elapsed:.2f}s body={r.text[:200]}")
-
-    total = time.time() - t_start
-    print(f"stress test done: {len(urls_and_captions)} images in {total:.2f}s")
+            await client.post(api_url, json=payload, headers=headers)
